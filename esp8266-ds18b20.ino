@@ -1,5 +1,6 @@
 //General ESP8266 WiFi staff
 #include <ESP8266WiFi.h>
+#include <WiFiManager.h>
 
 //network time needed
 #include <WiFiUdp.h>
@@ -14,9 +15,17 @@
 #include <FirebaseESP8266.h>
 #include <addons/TokenHelper.h>
 
-/*********  WiFi credentials **************/
-#define WIFI_SSID "SSID"
-#define WIFI_PASSWORD "PASS"
+//personal passwords predefined
+#include "secret.h"
+//or override below
+#ifndef SECRET_H
+#define WM_PASSWORD "123456"
+#define API_KEY "fire base api key"
+#define USER_EMAIL "user@server.com"
+#define USER_PASSWORD "123456"
+#define DATABASE_URL "https://database name.firebaseio.com" 
+#endif
+
 
 /********* NTP staff **************/
 WiFiUDP ntpUDP;
@@ -33,47 +42,37 @@ DallasTemperature sensors(&oneWire);
 DeviceAddress oneWireDeviceAddress; // We'll use this variable to store a found device address
 int numberOfOneWireDevices;
 
-/********* Firebird **************/
-#define API_KEY "AIzaSyBFmiUTEUt64h0eoLpYeqaIJjELbbE-UrE"
-/* Define the user Email and password that already registerd or added in your project */
-#define USER_EMAIL "user@email.com"
-#define USER_PASSWORD "password"
-#define DATABASE_URL "https://sample-storage-a309d.firebaseio.com" //<databaseName>.firebaseio.com or <databaseName>.<region>.firebasedatabase.app
+/********* Firebase **************/
 /* Define the Firebase Data object */
 FirebaseData fbdo;
 /* Define the FirebaseAuth data for authentication data */
 FirebaseAuth auth;
 /* Define the FirebaseConfig data for config data */
 FirebaseConfig config;
-//            authDomain: "sample-storage-a309d.firebaseapp.com",
-//            projectId: "sample-storage-a309d",
-//            storageBucket: "sample-storage-a309d.appspot.com",
-//            messagingSenderId: "494050894036",
-//            appId: "1:494050894036:web:c6b39b015367284925db41"
-        
+
+//General configuration        
 #define UPDATE_INTERVAL 60 //interval in seconds to update sensors
 uint32_t updateTiming;
-uint32_t startTime= 0;
+String startTime = "";
 
 void setup() {
-  // put your setup code here, to run once:
   pinMode(LED_BUILTIN, OUTPUT);
   //Basic serial and led initialization
   Serial.begin(115200);
 
   //WiFi initialization
+  Serial.println("Initializing Wi-Fi");
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED){
-    Serial.print(".");
-    delay(300);
+  WiFiManager wm;
+  bool res = wm.autoConnect(wm.getDefaultAPName().c_str(), WM_PASSWORD); // password protected ap
+  if (!res) {
+    Serial.println("Failed to connect");
+    //ESP.restart();
+  } else {
+    Serial.print("Connected with IP: ");
+    Serial.println(WiFi.localIP());
   }
-  Serial.println();
-  Serial.print("Connected with IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.println();
-
+  
   //DS18B20 initialization
   Serial.print("Sensor device initialization...");
   // locate devices on the bus
@@ -84,11 +83,7 @@ void setup() {
   Serial.println(numberOfOneWireDevices, DEC);
   for (int i = 0; i < numberOfOneWireDevices; i++){
     if (sensors.getAddress(oneWireDeviceAddress, i)) {
-      Serial.print("Devices #");
-      Serial.print(i, DEC);
-      Serial.print(" = ");
-      Serial.print(convertAddressToString(oneWireDeviceAddress));
-      Serial.println();
+      Serial.printf("Devices #%d = %s\n", i, convertAddressToString(oneWireDeviceAddress).c_str());
     }
   }
   Serial.println("DB18B20 ....DONE");
@@ -108,7 +103,8 @@ void setup() {
   // Initialize the library with the Firebase authen and config 
   Firebase.begin(&config, &auth);
 
-  updateTiming = millis() - UPDATE_INTERVAL * 1000;
+  //to force immediate execution (after 3 second)
+  updateTiming = millis() - UPDATE_INTERVAL * 1000 + 3 * 1000;
 }
 
 void loop() {
@@ -116,9 +112,6 @@ void loop() {
 
   if (millis() - updateTiming < UPDATE_INTERVAL * 1000) return;
   updateTiming = millis();
-
-  //get year month day hour
-  String path =  getTimeAsPath();
 
   // отправить команду для получения температуры
   //requested temperature will be ready after 750 ms
@@ -129,7 +122,10 @@ void loop() {
   while (millis() - timing < 1000) {
 
   }
-  //in async mode temperature will be ready after 750 ms
+
+  //get year month day hour min
+  String timePath =  getTimeAsPath(); /* yyyy/mm/dd/hh/nn */
+
   float temperatureC;
   for (int i = 0; i < numberOfOneWireDevices; i++){
     sensors.getAddress(oneWireDeviceAddress, i);
@@ -137,30 +133,37 @@ void loop() {
     temperatureC = sensors.getTempCByIndex(i);
     // Check if reading was successful
     if (temperatureC != DEVICE_DISCONNECTED_C) {
-      Serial.print(addr + " -> t");
-      Serial.print(i);
-      Serial.print(" = ");
-      Serial.print(temperatureC);
-      Serial.print("; ");
+      Serial.println("#" + String(i) + " " + addr + " -> t" +  + " = " + String(temperatureC, 2) + ";");
       //upload to DB
       if (Firebase.ready()) {
-        //path += auth.token.uid.c_str(); //<- user uid of current user that sign in with Emal/Password
-        String fullPath = "/temperatures/" + addr + "/" + path + "/t";
+        String fullPath = "/temperatures/" + addr + "/" + timePath + "/t";
         Serial.printf("Strore temp to t%d... %s\n", i, Firebase.setFloat(fbdo, fullPath.c_str(), temperatureC) ? "ok" : fbdo.errorReason().c_str());
-        String currentPath = "/sensors/" + addr + "/last/t";
-        Serial.printf("Strore last temp to t%d... %s\n", i, Firebase.setFloat(fbdo, currentPath.c_str(), temperatureC) ? "ok" : fbdo.errorReason().c_str());
-        currentPath = "/sensors/" + addr + "/last/time";
-        Serial.printf("Strore last time to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), path.c_str()) ? "ok" : fbdo.errorReason().c_str());
-        if (!startTime){
-          currentPath = "/sensors/" + addr + "/start/t";
-          Serial.printf("Strore start time to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), path.c_str()) ? "ok" : fbdo.errorReason().c_str());
+        FirebaseJson json;
+        json.set("t", temperatureC);
+        json.set("time", timePath);
+        String currentPath = "/sensors/" + addr + "/last";
+        Serial.printf("Strore last temp and time to t%d... %s\n", i, Firebase.set(fbdo, currentPath.c_str(), json) ? "ok" : fbdo.errorReason().c_str());
+//        String currentPath = "/sensors/" + addr + "/last/t";
+//        Serial.printf("Strore last temp to t%d... %s\n", i, Firebase.setFloat(fbdo, currentPath.c_str(), temperatureC) ? "ok" : fbdo.errorReason().c_str());
+//        currentPath = "/sensors/" + addr + "/last/time";
+//        Serial.printf("Strore last time to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+
+        if (startTime == ""){
+          currentPath = "/sensors/" + addr + "/start/time";
+          Serial.printf("Strore start time to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+          currentPath = "/uptime/" + addr + "/" + timePath + "/last_time";
+          Serial.printf("Insert uptime informatione to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+        } else {
+          currentPath = "/uptime/" + addr + "/" + startTime + "/last_time";
+          Serial.printf("Update uptime informatione to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
         }
+     
       }
     } else {
       Serial.print("ERROR NO SENSOR!");
     }
   }
-  startTime = timeClient.getEpochTime(); //set startTime different than 0 to avoid recurent writes
+  if (startTime == "" && Firebase.ready()) startTime = timePath; //set startTime different than 0 to avoid recurent writes of sensor start time
 
   Serial.println();
 
