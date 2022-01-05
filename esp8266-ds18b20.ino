@@ -11,6 +11,9 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
+//DHT sensor
+#include <DHT.h>
+
 //Firebase related
 #include <FirebaseESP8266.h>
 #include <addons/TokenHelper.h>
@@ -41,6 +44,11 @@ DallasTemperature sensors(&oneWire);
 //Ця змінна потрібна буде для запису адреси датчика температури
 DeviceAddress oneWireDeviceAddress; // We'll use this variable to store a found device address
 int numberOfOneWireDevices;
+
+/************* DHT22 *************/
+#define DHTPIN 2     // Digital pin connected to the DHT sensor
+#define DHTTYPE DHT22   // DHT 22  (AM2302), AM2321
+DHT dht(DHTPIN, DHTTYPE);
 
 /********* Firebase **************/
 /* Define the Firebase Data object */
@@ -77,6 +85,7 @@ void setup() {
   Serial.print("Sensor device initialization...");
   // locate devices on the bus
   sensors.begin();
+  delay(1000);
   numberOfOneWireDevices = sensors.getDeviceCount();
   delay(1500);
   Serial.print("Number of 1-wire devices = ");
@@ -87,6 +96,12 @@ void setup() {
     }
   }
   Serial.println("DB18B20 ....DONE");
+
+  //Initialize DHT if no One wire sensors found
+  if (!numberOfOneWireDevices){
+    Serial.print("Initializing DHT22...");
+    dht.begin();
+  }
 
   //Firebase initialization
   Serial.printf("Firebase Client v%s\n\n", FIREBASE_CLIENT_VERSION);
@@ -163,6 +178,10 @@ void loop() {
       Serial.print("ERROR NO SENSOR!");
     }
   }
+
+  processDHT22();
+  
+  //only if start time was written
   if (startTime == "" && Firebase.ready()) startTime = timePath; //set startTime different than 0 to avoid recurent writes of sensor start time
 
   Serial.println();
@@ -200,4 +219,42 @@ String formatInt(int n, int leadingZero) {
   if (leadingZero > result.length()) 
     result = zeroes.substring(0, leadingZero - result.length()) + result;
   return result;
+}
+
+
+void processDHT22() {
+
+  Serial.print("ESP Board MAC Address:  ");
+  Serial.println(WiFi.macAddress());
+  
+  // Reading temperature or humidity takes about 250 milliseconds!
+  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  float h = dht.readHumidity();
+  // Read temperature as Celsius (the default)
+  float t = dht.readTemperature();
+  // Read temperature as Fahrenheit (isFahrenheit = true)
+  float f = dht.readTemperature(true);
+
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(h) || isnan(t) || isnan(f)) {
+    Serial.println(F("Failed to read from DHT sensor!"));
+    return;
+  }
+
+  // Compute heat index in Fahrenheit (the default)
+  float hif = dht.computeHeatIndex(f, h);
+  // Compute heat index in Celsius (isFahreheit = false)
+  float hic = dht.computeHeatIndex(t, h, false);
+
+  Serial.print(F("Humidity: "));
+  Serial.print(h);
+  Serial.print(F("%  Temperature: "));
+  Serial.print(t);
+  Serial.print(F("°C "));
+  Serial.print(f);
+  Serial.print(F("°F  Heat index: "));
+  Serial.print(hic);
+  Serial.print(F("°C "));
+  Serial.print(hif);
+  Serial.println(F("°F"));
 }
