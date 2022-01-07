@@ -43,7 +43,6 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 //Ця змінна потрібна буде для запису адреси датчика температури
 DeviceAddress oneWireDeviceAddress; // We'll use this variable to store a found device address
-int numberOfOneWireDevices;
 
 /************* DHT22 *************/
 #define DHTPIN 2     // Digital pin connected to the DHT sensor
@@ -61,7 +60,12 @@ FirebaseConfig config;
 //General configuration        
 #define UPDATE_INTERVAL 60 //interval in seconds to update sensors
 uint32_t updateTiming;
+
+//global variable to correctly process hot plug functionality
 String startTime = "";
+String prevProcessedSensorsList = ":";
+int processedSensorsCnt = 0;
+String processedSensorsList = ":";
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
@@ -72,37 +76,20 @@ void setup() {
   Serial.println("Initializing Wi-Fi");
   WiFi.mode(WIFI_STA);
   WiFiManager wm;
+  wm.setConfigPortalTimeout(180);
+
   bool res = wm.autoConnect(wm.getDefaultAPName().c_str(), WM_PASSWORD); // password protected ap
   if (!res) {
     Serial.println("Failed to connect");
-    //ESP.restart();
+    delay(3000);
+    //reset and try again, or maybe put it to deep sleep
+    ESP.restart();
+    delay(5000);
   } else {
     Serial.print("Connected with IP: ");
     Serial.println(WiFi.localIP());
   }
   
-  //DS18B20 initialization
-  Serial.print("Sensor device initialization...");
-  // locate devices on the bus
-  sensors.begin();
-  delay(1000);
-  numberOfOneWireDevices = sensors.getDeviceCount();
-  delay(1500);
-  Serial.print("Number of 1-wire devices = ");
-  Serial.println(numberOfOneWireDevices, DEC);
-  for (int i = 0; i < numberOfOneWireDevices; i++){
-    if (sensors.getAddress(oneWireDeviceAddress, i)) {
-      Serial.printf("Devices #%d = %s\n", i, convertAddressToString(oneWireDeviceAddress).c_str());
-    }
-  }
-  Serial.println("DB18B20 ....DONE");
-
-  //Initialize DHT if no One wire sensors found
-  if (!numberOfOneWireDevices){
-    Serial.print("Initializing DHT22...");
-    dht.begin();
-  }
-
   //Firebase initialization
   Serial.printf("Firebase Client v%s\n\n", FIREBASE_CLIENT_VERSION);
   config.api_key = API_KEY;
@@ -125,62 +112,79 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
 
+  //wait for some period of second to collect and upload sensors only onece per UPDATE_INTERVAL seconds
   if (millis() - updateTiming < UPDATE_INTERVAL * 1000) return;
   updateTiming = millis();
 
-  // отправить команду для получения температуры
-  //requested temperature will be ready after 750 ms
-  sensors.setWaitForConversion(false);
-  sensors.requestTemperatures();
-  //wait for 1 seconds and process buttons or other staff in this time
-  uint32_t timing = millis();
-  while (millis() - timing < 1000) {
-
-  }
-
+  //Check NTP time
   //get year month day hour min
-  String timePath =  getTimeAsPath(); /* yyyy/mm/dd/hh/nn */
+  String timePath =  getTimeAsPath(); /* yyyy/mm/dd/hh/nn or empty is error*/
+  if (!timePath.length()) return;
 
-  float temperatureC;
-  for (int i = 0; i < numberOfOneWireDevices; i++){
-    sensors.getAddress(oneWireDeviceAddress, i);
-    String addr = convertAddressToString(oneWireDeviceAddress);
-    temperatureC = sensors.getTempCByIndex(i);
-    // Check if reading was successful
-    if (temperatureC != DEVICE_DISCONNECTED_C) {
-      Serial.println("#" + String(i) + " " + addr + " -> t" +  + " = " + String(temperatureC, 2) + ";");
-      //upload to DB
-      if (Firebase.ready()) {
-        String fullPath = "/temperatures/" + addr + "/" + timePath + "/t";
-        Serial.printf("Strore temp to t%d... %s\n", i, Firebase.setFloat(fbdo, fullPath.c_str(), temperatureC) ? "ok" : fbdo.errorReason().c_str());
-        FirebaseJson json;
-        json.set("t", temperatureC);
-        json.set("time", timePath);
-        String currentPath = "/sensors/" + addr + "/last";
-        Serial.printf("Strore last temp and time to t%d... %s\n", i, Firebase.set(fbdo, currentPath.c_str(), json) ? "ok" : fbdo.errorReason().c_str());
-//        String currentPath = "/sensors/" + addr + "/last/t";
-//        Serial.printf("Strore last temp to t%d... %s\n", i, Firebase.setFloat(fbdo, currentPath.c_str(), temperatureC) ? "ok" : fbdo.errorReason().c_str());
-//        currentPath = "/sensors/" + addr + "/last/time";
-//        Serial.printf("Strore last time to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+  //to chack hot plug of sensors and make necessary updates in case sensor configuration changed
+  processedSensorsCnt = 0;
+  processedSensorsList = ":";
 
-        if (startTime == ""){
-          currentPath = "/sensors/" + addr + "/start/time";
-          Serial.printf("Strore start time to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
-          currentPath = "/uptime/" + addr + "/" + timePath + "/last_time";
-          Serial.printf("Insert uptime informatione to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
-        } else {
-          currentPath = "/uptime/" + addr + "/" + startTime + "/last_time";
-          Serial.printf("Update uptime informatione to t%d... %s\n", i, Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
-        }
-     
+  //Search for DS18B20 sensors
+  Serial.printf("Search for DS18B20 Sensors ...");
+  sensors.begin();
+  int numberOfOneWireDevices = sensors.getDeviceCount();
+  Serial.printf("Found %d of 1-wire devices.\n", numberOfOneWireDevices);
+
+  //We have connected some one wire sensors
+  if (numberOfOneWireDevices > 0){
+    // отправить команду для получения температуры
+    //requested temperature will be ready after 750 ms
+    sensors.setWaitForConversion(false);
+    sensors.requestTemperatures();
+    //wait for 1 seconds and process buttons or other staff in this time
+    uint32_t timing = millis();
+    while (millis() - timing < 1000) {
+
+    }
+
+    //process all DS18B20 sensors in a loop
+    float temperatureC;
+    for (int i = 0; i < numberOfOneWireDevices; i++){
+      sensors.getAddress(oneWireDeviceAddress, i);
+      String addr = convertAddressToString(oneWireDeviceAddress);
+      Serial.printf("Processing Devices #%d = %s", i, addr.c_str());
+
+      temperatureC = sensors.getTempC(oneWireDeviceAddress);
+      // Check if reading was successful
+      if (temperatureC != DEVICE_DISCONNECTED_C) {
+        Serial.println(" -> t = " + String(temperatureC, 2) + ";");
+        fbStoreSensorData(addr, timePath, temperatureC, 0, 0);
+      } else {
+        Serial.println("ERROR NO SENSOR!");
       }
+    }
+  } else {
+    //no 1-wire devices, search fo DHT
+    Serial.printf("Search for DHT Sensors ...");
+    dht.begin();
+    delay(2000);
+
+    // Reading temperature or humidity takes about 250 milliseconds!
+    // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+    float h = dht.readHumidity();
+    // Read temperature as Celsius (the default)
+    float t = dht.readTemperature();
+    // Check if any reads failed and exit early (to try again).
+    if (!(isnan(h) || isnan(t))) {//successfully read values
+      // Compute heat index in Celsius (isFahreheit = false)
+      float hic = dht.computeHeatIndex(t, h, false);
+      String addr = WiFi.macAddress();//use ESP unique MAC as sensor id
+      addr.replace(":", "-");
+      Serial.printf("Processing DHT Devices = %s", addr.c_str());
+      Serial.println(" -> t = " + String(t, 2) + "; h = " + String(h, 2) + "; hic = " + String(hic, 2) + ";");
+      fbStoreSensorData(addr, timePath, t, h, hic);
     } else {
-      Serial.print("ERROR NO SENSOR!");
+      Serial.println("ERROR NO SENSOR!");
     }
   }
 
-  processDHT22();
-  
+  if (processedSensorsList != ":") prevProcessedSensorsList = processedSensorsList;
   //only if start time was written
   if (startTime == "" && Firebase.ready()) startTime = timePath; //set startTime different than 0 to avoid recurent writes of sensor start time
 
@@ -203,11 +207,9 @@ String convertAddressToString(DeviceAddress deviceAddress)
 
 String getTimeAsPath(void) {
   timeClient.update();
-  
   unsigned long rawTime = timeClient.getEpochTime();
+  if (year(rawTime) < 2020) return String(); //something wrong with time servers
   String result = formatInt(year(rawTime), 4) + '/' + formatInt(month(rawTime), 2)  + '/' + formatInt(day(rawTime), 2) + '/' + formatInt(hour(rawTime), 2) + '/' + formatInt(minute(rawTime), 2);
-  Serial.println(result);
-
   return result;
 }
 
@@ -222,39 +224,42 @@ String formatInt(int n, int leadingZero) {
 }
 
 
-void processDHT22() {
-
-  Serial.print("ESP Board MAC Address:  ");
-  Serial.println(WiFi.macAddress());
+bool fbStoreSensorData(String addr, String timePath, float temperatureC, float humidity, float heatIndex){
+  //upload to DB
+  if (!Firebase.ready()) return false;
+  String currentPath;
   
-  // Reading temperature or humidity takes about 250 milliseconds!
-  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  float h = dht.readHumidity();
-  // Read temperature as Celsius (the default)
-  float t = dht.readTemperature();
-  // Read temperature as Fahrenheit (isFahrenheit = true)
-  float f = dht.readTemperature(true);
-
-  // Check if any reads failed and exit early (to try again).
-  if (isnan(h) || isnan(t) || isnan(f)) {
-    Serial.println(F("Failed to read from DHT sensor!"));
-    return;
+  FirebaseJson jsonT;
+  jsonT.set("t", temperatureC);
+  if (humidity > 0) {
+    jsonT.set("h", humidity);
+    jsonT.set("ti", heatIndex);
   }
+  currentPath = "/temperatures/" + addr + "/" + timePath;
+  Serial.printf("Strore temp and hum to %s... %s\n", currentPath.c_str(), Firebase.set(fbdo, currentPath.c_str(), jsonT) ? "ok" : fbdo.errorReason().c_str());
 
-  // Compute heat index in Fahrenheit (the default)
-  float hif = dht.computeHeatIndex(f, h);
-  // Compute heat index in Celsius (isFahreheit = false)
-  float hic = dht.computeHeatIndex(t, h, false);
+  FirebaseJson jsonL;
+  jsonL.set("t", temperatureC);
+  jsonL.set("time", timePath);
+  currentPath = "/sensors/" + addr + "/last";
+  Serial.printf("Strore last temp and time to %s... %s\n", currentPath.c_str(), Firebase.set(fbdo, currentPath.c_str(), jsonL) ? "ok" : fbdo.errorReason().c_str());
 
-  Serial.print(F("Humidity: "));
-  Serial.print(h);
-  Serial.print(F("%  Temperature: "));
-  Serial.print(t);
-  Serial.print(F("°C "));
-  Serial.print(f);
-  Serial.print(F("°F  Heat index: "));
-  Serial.print(hic);
-  Serial.print(F("°C "));
-  Serial.print(hif);
-  Serial.println(F("°F"));
+  processedSensorsCnt++;
+  processedSensorsList+=addr+':';
+
+  if (prevProcessedSensorsList.indexOf(":"+addr+":") < 0) {
+    currentPath = "/sensors/" + addr + "/start/time";
+    Serial.printf("Strore start time to %s... %s\n", currentPath.c_str(), Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+    currentPath = "/sensorsList/" + addr;
+    Serial.printf("Strore sensor id to %s... %s\n", currentPath.c_str(), Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+    currentPath = "/uptime/" + addr + "/" + timePath + "/last_time";
+    Serial.printf("Insert uptime informatione to %s... %s\n", currentPath.c_str(), Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+    startTime = timePath;//update start time when new sensors added
+  } else {
+    if (startTime != ""){
+      currentPath = "/uptime/" + addr + "/" + startTime + "/last_time";
+      Serial.printf("Update uptime informatione to %s... %s\n", currentPath.c_str(), Firebase.setString(fbdo, currentPath.c_str(), timePath.c_str()) ? "ok" : fbdo.errorReason().c_str());
+    }
+  }
+  return true;
 }
